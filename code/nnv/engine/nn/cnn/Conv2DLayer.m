@@ -643,13 +643,83 @@ classdef Conv2DLayer < handle
             end
             
             if input.numChannel ~= obj.NumChannels
-                error("Input set contains %d channels while the convolutional layers has %d channels", input.numChannel, obj.NumChannels);
+%                error("Input set contains %d channels while the convolutional layers has %d channels", input.numChannel, obj.NumChannels);
+            end
+            
+%            input.V(:,:,:,1)
+%            input.V(:,:,:,2:input.numPred + 1)
+            size(input.V(:,:,:,1))
+            size(input.V(:,:,:,2:input.numPred + 1))
+            
+            figure;
+            if size(input.V(:,:,:,1),3) > 1
+                imshow(input.V(:,:,1,1))
+                
+                w_tmp = double(permute(obj.Weights, [1,2,4,3]));
+%                    w_tmp = double(obj.Weights);
+                
+                % todo: finish all dimension
+%                for ni = 1 : size(input.V(:,:,:,1),3)
+%                    imshow(input.V(:,:,ni,1))
+                    
+                    obj.Weights
+                    obj.Bias
+                    
+                    size(input.V(:,:,:,1))
+                    size(obj.Weights)
+                    size(obj.Bias)
+%                    size(obj.Stride)
+%                    size(obj.PaddingSize)
+                    
+                    % double(repmat(permute(obj.Bias, [1 2 3]),2))
+                    % double(permute(obj.Bias, [3 1 2]))
+                    
+                    if size(obj.Weights,3) ~= size(obj.Weights,4)
+                        %bias_tmp = double(permute(repmat(permute(obj.Bias, [1 2 3]), size(obj.Weights,3)),[3 1 2]));
+                        bias_tmp = double(obj.Bias);
+                        
+                        
+                    size(bias_tmp)
+                    
+                    bias_tmp = squeeze(bias_tmp);
+                    size(bias_tmp);
+                    bias_tmp
+                    
+                    bias_tmp = reshape(bias_tmp,1,2);
+                    %bias_tmp = repmat(bias_tmp,16);
+                    bias_tmp = repmat(bias_tmp,16,1)
+                    bias_tmp
+                    size(bias_tmp)
+                    size(w_tmp)
+                    
+%                    ' zerod bias'
+%                    bias_tmp = zeros(1,32); % correct...
+%                    bias_tmp
+%                    size(bias_tmp)
+                    
+                    else
+                        bias_tmp = double(obj.Bias);
+                    end
+                    
+                    
+                    c = vl_nnconv(double(input.V(:,:,:,1)), w_tmp, bias_tmp, 'Stride', obj.Stride, 'Pad', obj.PaddingSize, 'Dilate', obj.DilationFactor);
+                    V = vl_nnconv(double(input.V(:,:,:,2:input.numPred + 1)), w_tmp, [], 'Stride', obj.Stride, 'Pad', obj.PaddingSize, 'Dilate', obj.DilationFactor);         
+ %               end
+            else
+                imshow(input.V(:,:,:,1))
+                c = vl_nnconv(double(input.V(:,:,:,1)), double(obj.Weights), double(obj.Bias), 'Stride', obj.Stride, 'Pad', obj.PaddingSize, 'Dilate', obj.DilationFactor);
+                V = vl_nnconv(double(input.V(:,:,:,2:input.numPred + 1)), double(obj.Weights), [], 'Stride', obj.Stride, 'Pad', obj.PaddingSize, 'Dilate', obj.DilationFactor);         
+ 
             end
             
             % compute output sets
-            c = vl_nnconv(double(input.V(:,:,:,1)), double(obj.Weights), double(obj.Bias), 'Stride', obj.Stride, 'Pad', obj.PaddingSize, 'Dilate', obj.DilationFactor);
-            V = vl_nnconv(double(input.V(:,:,:,2:input.numPred + 1)), double(obj.Weights), [], 'Stride', obj.Stride, 'Pad', obj.PaddingSize, 'Dilate', obj.DilationFactor);         
-            Y = cat(4, c, V);
+            size(c)
+            size(V)
+%            if size(c,3) ~= size(V,3)
+%                Y = cat(4, c, V(:,:,1:2));
+%            else
+                Y = cat(4, c, V);
+%            end
             S = ImageStar(Y, input.C, input.d, input.pred_lb, input.pred_ub);
                   
         end

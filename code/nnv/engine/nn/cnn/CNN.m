@@ -509,6 +509,9 @@ classdef CNN < handle
                         Li = AveragePooling2DLayer.parse(L);
                     elseif isa(L, 'nnet.cnn.layer.FullyConnectedLayer')
                         Li = FullyConnectedLayer.parse(L);
+                    elseif isa(L, 'nnet.cnn.layer.PixelClassificationLayer')
+                        'skipping pixel classification layer, todo add support'
+                        %Li = FullyConnectedLayer.parse(L);
                     else                     
                         fprintf('\nLayer %d is a %s which have not supported yet in nnv, please consider removing this layer for the analysis', i, class(L));
                         error('\nUnsupported Class of Layer');                     
