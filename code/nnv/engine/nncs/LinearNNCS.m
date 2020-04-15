@@ -8,29 +8,16 @@ classdef LinearNNCS < handle
     properties
         controller = []; % a feedfoward neural network
         plant = []; % linear plant model
-        feedbackMap = []; % a feedback matrix decribes the mapping from a group of 
-                          % outputs of the plant to a group of inputs of the controller
-                          
         % nerual network control system architecture
         %
-        %              --->| plant ---> y(t) ---sampling--->y(k) 
+        % nerual network control system architecture
+        %
+        %              ---> plant ---> y(t) ---sampling--->y(k) 
         %             |                                       |
         %             |                                       |
-        %             u(k) <---- controller |<---- v(k)-------|--- (reference inputs to the controller) 
-        %                                   |<----- y(k)------|(output feedback)                                    
-        
-        
-        % the input to neural net controller is grouped into 2 group
-        % the first group contains all the reference inputs
-           
-        % the first layer weight matrix of the controller is decomposed into two
-        % submatrices: W = [W1 W2] where
-        %              W1 is conresponding to I1 = v[k] (the reference input)
-        %              W2 is conresponding to I2 = y[k] (the feedback inputs)  
-        
-        % the reach set of the first layer of the controller is: 
-        %              R = f(W1 * I1 + W2 * I2 + b), b is the bias vector of
-        %              the first layer, f is the activation function
+        %             u(k) <---- controller |<---- y(k)-----(output feedback) 
+        %                                   |<----- v(k)------(reference input)   
+        %                                   
         
         nO = 0; % number of output
         nI = 0; % number of inputs = size(I1, 1) + size(I2, 1) to the controller
@@ -104,9 +91,11 @@ classdef LinearNNCS < handle
             obj.nI = controller.nI; % number of input to the controller
             obj.nI_fb = plant.nO; % number of feedback inputs to the controller
             obj.nI_ref = controller.nI - obj.nI_fb; % number of reference inputs to the controller
+            obj.plantNumOfSimSteps = obj.plant.numReachSteps;
+            obj.controlPeriod = obj.plant.controlPeriod;
             new_A = [obj.plant.A obj.plant.B; zeros(obj.plant.nI, obj.plant.dim) zeros(obj.plant.nI, obj.plant.nI)];
             new_C = [eye(obj.plant.dim) zeros(obj.plant.dim, obj.plant.nI)];
-            obj.transPlant = LinearODE(new_A, [], new_C, []);
+            obj.transPlant = LinearODE(new_A, [], new_C, [], obj.plant.controlPeriod, obj.plant.numReachSteps);
             
         end
         
@@ -130,67 +119,30 @@ classdef LinearNNCS < handle
         
         
         % reach
-        function [R, reachTime] = reach(varargin)
-            % @init_set: initial set of state, a star set
-            % @ref_input: reference input, may be a vector or a star set
-            % @numOfSteps: number of steps
-            % @method: 'exact-star' or 'approx-star'
-            % @numCores: number of cores used in computation
-            % @numOfSimSteps: number of sim steps to compute reachable set
-            % for the plant
+        function [R, reachTime] = reach(obj, reachPRM)
+            % @reachPRM: reachability parameters containing following
+            % inputs:
+            %       1) @init_set: initial set of state, a star set
+            %       2) @ref_input: reference input, may be a vector or a star set
+            %       3) @numOfSteps: number of steps
+            %       4) @method: 'exact-star' or 'approx-star'
+            %       5) @numCores: number of cores used in computation
+            %       6) @numOfSimSteps: number of sim steps to compute reachable set
+            %          for the plant
             % NOTE***: parallel computing may not help due to
             % comuninication overhead in the computation
             
             
             % author: Dung Tran
             % date: 10/1/2019
+            % update: 3/15/2020
             
-            
-            switch nargin
-                
-                case 4
-                    
-                    obj = varargin{1};
-                    init_set1 = varargin{2};
-                    ref_input1 = varargin{3};
-                    numOfSteps = varargin{4};
-                    method1 = 'approx-star';
-                    numCores1 = 1;
-                    numOfSimSteps = 20;
-                               
-                case 5
-                    obj = varargin{1};
-                    init_set1 = varargin{2};
-                    ref_input1 = varargin{3};
-                    numOfSteps = varargin{4};
-                    method1 = varargin{5};
-                    numCores1 = 1;
-                    numOfSimSteps = 20;
-                    
-                                      
-                case 6
-                    obj = varargin{1};
-                    init_set1 = varargin{2};
-                    ref_input1 = varargin{3};
-                    numOfSteps = varargin{4};
-                    method1 = varargin{5};
-                    numCores1 = varargin{6};
-                    numOfSimSteps = 20;
-                     
-                case 7
-                    obj = varargin{1};
-                    init_set1 = varargin{2};
-                    ref_input1 = varargin{3};
-                    numOfSteps = varargin{4};
-                    method1 = varargin{5};
-                    numCores1 = varargin{6};
-                    numOfSimSteps = varargin{7};
-                    
-                                      
-                otherwise 
-                    error('Invalid number of inputs, should be 3, 4, 5, or 6');
-            end
-            
+            init_set1 = reachPRM.init_set;
+            ref_input1 = reachPRM.ref_input;
+            numOfSteps = reachPRM.numSteps; 
+            method1 = reachPRM.reachMethod;
+            numCores1 = reachPRM.numCores;
+                       
             if ~isa(init_set1, 'Star')
                 error('Initial set is not a star set');
             end
@@ -206,11 +158,7 @@ classdef LinearNNCS < handle
             if numOfSteps < 1
                 error('Invalid number of steps');
             end
-            
-            if numOfSimSteps < 1
-                error('Invalid number of simulation steps for computing reachable set of the plant');
-            end
-            
+                        
             if ~isempty(ref_input1) && ~isa(ref_input1, 'Star') && size(ref_input1, 2) ~= 1 && size(ref_input1, 1) ~= obj.nI_ref
                 error('Invalid reference input vector');
             end
@@ -224,8 +172,7 @@ classdef LinearNNCS < handle
             obj.plantReachSet = cell(1, numOfSteps);
             obj.plantIntermediateReachSet = cell(1,numOfSteps);
             obj.controllerReachSet = cell(1, numOfSteps);
-            obj.plantNumOfSimSteps = numOfSimSteps;
-                
+                            
             if obj.numCores > 1
                 obj.start_pool;
             end
@@ -289,7 +236,7 @@ classdef LinearNNCS < handle
             map_mat(1) = 1;
             option.outputMatrix = map_mat;
             option.outputVector = [];
-            option.OuputSetColor = 'blue';
+            option.outputSetColor = 'blue';
             option.boundaryMatrix = [];
             option.boundaryVector = [];
             option.boundarySetColor = 'red'; 
@@ -1140,26 +1087,43 @@ classdef LinearNNCS < handle
     methods % VERIFICATION METHOD
         
         
-        function [safe, counterExamples, verifyTime] = verify(obj, unsafe_mat, unsafe_vec)
-            % @unsafe_mat: unsafe matrix
-            % @unsafe_vec: unsafe vector            
-            % Usafe region is defined by: x: unsafe_mat * x <= unsafe_vec
+        function [safe, counterExamples, verifyTime] = verify(obj, reachPRM, unsafeRegion)
+            % @reachPRM: reachability parameters consists of following
+            % inputs: 
+            %       1) @reachPRM.init_set: initial set
+            %       2) @reachPRM.ref_input: reference input
+            %       3) @reachPRM.numSteps: number of steps
+            %       4) @reachPRM.reachMethod: method for reachability analysis
+            %       5) @reachPRM.numCores: number of cores used in reachability analysis
+            %       6) @reachPRM.plantNumSimSteps: number of simulation
+            %          steps for the plant in 1 control period
+            %       6) @reachPRM.controlPeriod: controler period 
+            % @unsafeRegion: a Halfpsace object
+            % Usafe region is defined by: y: unsafe_mat * x <= unsafe_vec
             
-            % @safe: = 0: unsafe
-            %        = 1: safe
-            %        = 2: unknown (due to conservativeness)
-            % @counterExamples: an array of star set counterExamples
+            % @safe: = unsafe
+            %        = safe
+            %        = unknown (due to conservativeness)
+            % @counterExamples: an array of star set counterExamples or
+            %                   falsified input points
             % @verifyTime: verification time
             
             % author: Dung Tran
             % date: 10/2/2019
+            % update: 3/15/2020
             
-            
+                        
+            unsafe_mat = unsafeRegion.G;
+            unsafe_vec = unsafeRegion.g;
+            falsifyPRM.init_set = reachPRM.init_set;
+            falsifyPRM.ref_input = reachPRM.ref_input;
+            falsifyPRM.numSteps = reachPRM.numSteps;
+            falsifyPRM.numTraces = 1000;
+            falsifyPRM.controlPeriod = obj.plant.controlPeriod;
+            falsifyPRM.unsafeRegion = unsafeRegion;
+                        
             t = tic; 
-            if isempty(obj.plantReachSet)
-                error('Plant reachable set is empty, please do reachability analysis first');
-            end
-            
+                        
             dim = obj.plant.dim; 
             
             if (size(unsafe_mat, 2) ~= dim) 
@@ -1174,6 +1138,7 @@ classdef LinearNNCS < handle
                 error('Inconsistent dimension between unsafe matrix and unsafe vector');
             end
             
+            obj.reach(reachPRM); % perform reachability analysis
             X = obj.plantReachSet; 
             n = length(X);
             % flatten reach sets
@@ -1193,12 +1158,12 @@ classdef LinearNNCS < handle
             end
             
             if isempty(G)
-                safe = 1;
+                safe = 'SAFE';
                 counterExamples = [];
             else
                 
                 if strcmp(obj.method, 'exact-star')
-                    safe = 0;
+                    safe = 'UNSAFE';
                     % construct a set of counter examples                    
                     n = length(G);
                     counterExamples = [];
@@ -1209,19 +1174,18 @@ classdef LinearNNCS < handle
                     
                     
                 elseif strcmp(obj.method, 'approx-star')
-                    safe = 2; % unknown due to over-approximation error, we can try using simulation to falsify the property
-                    counterExamples = [];
+                    [safe, counterExamples, ~] = obj.falsify(falsifyPRM);
                 end
             
             
             end
             
             
-            if safe == 0
-                fprintf('\n\nThe neural network control system is unsafe, NNV produces %d star sets of counter-examples', n);
-            elseif safe == 1
+            if strcmp(safe, 'UNSAFE')
+                fprintf('\n\nThe neural network control system is unsafe, NNV produces counter-examples');
+            elseif strcmp(safe, 'SAFE')
                 fprintf('\n\nThe neural network control system is safe');
-            elseif safe == 2
+            elseif strcmp(safe, 'UNKNOWN')
                 fprintf('\n\n The safety of the neural network control system is unknown');
                 fprintf('\nYou can try falsification method using simulation to find counter-examples');
             end
@@ -1286,7 +1250,12 @@ classdef LinearNNCS < handle
                y = obj.plant.C * x;
                y1 = [ref_input; y];
                u = obj.controller.evaluate(y1);
-               simTrace(:, i) = obj.plant.A * x + obj.plant.B * u;
+               x0 = [x; u];
+               [~,~,x1] = obj.transPlant.initial(x0, obj.controlPeriod);
+               n = size(x1, 1);
+               x2 = x1(n, :)'; % store computed states to simTrace 
+               x2(obj.plant.dim + 1:obj.transPlant.dim) = []; 
+               simTrace(:, i) = x2;
                controlTrace(:,i) = u;
            end
            
@@ -1427,13 +1396,15 @@ classdef LinearNNCS < handle
     
     methods % FALSIFICATION USING SIMULATION
         
-        function [safe, falsifyTraces, falsifyTime] = falsify(obj, init_set, ref_input, numSteps, N, unsafe_mat, unsafe_vec)
-            % @init_set: initial set of state, a star set
-            % @ref_input: reference input, a vector or a star set
-            % @numSteps: number of simulation steps 
-            % @N: number of traces generated for falsification
-            % @unsafe_mat: unsafe matrix
-            % @unsafe_vec: unsafe vector
+        function [safe, falsifyTraces, falsifyTime] = falsify(obj, falsifyPRM)
+            % @fasifyPRM: falsification parameters including following
+            % inputs:
+            %       1) @init_set: initial set of state, a star set
+            %       2) @ref_input: reference input, a vector or a star set
+            %       3) @numSteps: number of simulation steps 
+            %       4) @numTraces: number of traces generated for falsification
+            %       5) @controlPeriod: control period
+            %       6) @unsafeRegion: a HalfSpace object
             % unsafe region is defined by: U = unsafe_mat * x <= unsafe_vec
             
             % @safe: = 0: unsafe
@@ -1444,17 +1415,22 @@ classdef LinearNNCS < handle
             
             % author: Dung Tran
             % date: 10/3/2019
+            % update 3/15/2020
             
             t = tic;
             
-            display(N);
+            initSet = falsifyPRM.init_set;
+            ref_input = falsifyPRM.ref_input;
+            numSteps = falsifyPRM.numSteps;
+            numTraces = falsifyPRM.numTraces;
+            obj.controlPeriod = falsifyPRM.controlPeriod;
+            unsafe_mat = falsifyPRM.unsafeRegion.G;
+            unsafe_vec = falsifyPRM.unsafeRegion.g;
             
-            obj.generateTraces(init_set, ref_input, numSteps, N);
+            obj.generateTraces(initSet, ref_input, numSteps, numTraces);
                        
             n = length(obj.simTraces);
-            
-            display(n);
-            
+                        
             m = size(obj.simTraces{1}, 2);
             
             U = HalfSpace(unsafe_mat, unsafe_vec);

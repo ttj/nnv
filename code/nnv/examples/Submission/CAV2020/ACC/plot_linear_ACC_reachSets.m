@@ -1,7 +1,7 @@
 % Plot reachable sets for Discrete Linear ACC model
 % Dung Tran: 10/22/2019
 
-path_out = [path_results(), filesep, 'ACC', filesep];
+path_out = [path_results(), filesep, 'ACC', filesep];	
 
 %% System model
 % x1 = lead_car position
@@ -32,7 +32,7 @@ B = [0; 0; 0; 0; 0; 2; 0];
 C = [1 0 0 -1 0 0 0; 0 1 0 0 -1 0 0; 0 0 0 0 1 0 0];  % feedback relative distance, relative velocity, longitudinal velocity
 D = [0; 0; 0]; 
 
-plant = LinearODE(A, B, C, D); % continuous plant model
+plant = LinearODE(A, B, C, D, 0.1, 20); % continuous plant model
 
 plantd = plant.c2d(0.1); % discrete plant model
 
@@ -109,20 +109,25 @@ end
 
 
 %% Compute reachable set
-numSteps = 50; 
+reachPRM.init_set = init_set(1);
+reachPRM.ref_input = ref_input;
+reachPRM.numSteps = 50;
+reachPRM.reachMethod = 'approx-star';
 
-% set number of cores if not already defined externally
 if ~exist('numCores')
-    numCores = 4;
+    reachPRM.numCores = 4;
+else
+    reachPRM.numCores = numCores;
 end
 
-ncs.reach(init_set(1), ref_input, numSteps, 'approx-star', numCores);
+ncs.reach(reachPRM);
 
 save([path_out, 'linear_ACC_ncs_1.mat'], 'ncs');
 
-ncs.reach(init_set(6), ref_input, numSteps, 'approx-star', numCores);
+reachPRM.init_set = init_set(6);
+ncs.reach(reachPRM);
 
-save([path_out, 'linear_ACC_ncs_6.mat'], 'ncs');
+save([path_out, 'linear_ACC_ncs_6.mat'], 'ncs');	
 
 %% Plot output reach sets: actual distance vs. safe distance
 
@@ -131,12 +136,12 @@ save([path_out, 'linear_ACC_ncs_6.mat'], 'ncs');
 
 figure;
 h1 = subplot(2,1,1);
-load([path_out, 'linear_ACC_ncs_1.mat']);
+load([path_out, 'linear_ACC_ncs_1.mat']);	
 map_mat = [1 0 0 -1 0 0 0];
 map_vec = [];
 ncs.plotOutputReachSets('blue', map_mat, map_vec);
 hold on;
-% plot safe distance between two cars: d_safe = D_default + t_gap * v_ego;
+% plot safe distance betwenen two cars: d_safe = D_default + t_gap * v_ego;
 % D_default = 10; t_gap = 1.4 
 % d_safe = 10 + 1.4 * x5; 
 
@@ -149,7 +154,7 @@ ylabel(h1, 'Distance');
 xticks(h1, [0:5:50])
 
 h2 = subplot(2,1,2);
-load([path_out, 'linear_ACC_ncs_6.mat']);
+load([path_out, 'linear_ACC_ncs_6.mat']);	
 map_mat = [1 0 0 -1 0 0 0];
 map_vec = [];
 ncs.plotOutputReachSets('blue', map_mat, map_vec);

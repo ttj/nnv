@@ -8,6 +8,45 @@ catch
     'ERROR: path likely not set, run install.m'
 end
 
+cd /code/nnv/examples/Submission/CAV2020_ImageStar/
+
+cd MNIST_NETS/Small
+%plot_ranges
+%saveas(gcf, '/results/figure8_mnist_small.png')
+%compare_star_absdom_short % ~ 5 min
+%compare_star_absdom % full version: 10:41 total
+
+% next together: > 1.5 hours for short version
+cd ../Medium
+%compare_star_absdom_short
+%compare_star_absdom  % full version: 10:41 total
+
+cd ../Large
+%compare_star_absdom_short
+%compare_star_absdom  % full version: 10:41 total
+
+
+cd /code/nnv/examples/Submission/CAV2020_ImageStar/
+
+cd VGG16/Compare_Polytope_ImageStar
+%verify_VGG16 % takes ~1:38 hours:min
+
+cd ../Compare_Exact_vs_Approx
+%verify_robustness_delta_2e_07 % ~15 min
+
+%verify_robustness_delta_e_07 % ~15 min
+
+cd /code/nnv/examples/Submission/CAV2020_ImageStar/
+
+cd VGG19/Compare_Polytope_ImageStar
+%verify_VGG19 % 1:10
+
+cd ../Compare_Exact_vs_Approx
+
+
+return
+
+
 cd /code/nnv/examples/Submission/CAV2020/
 
 % examples to manually run nnv on acas-xu, these (and many more) are 
@@ -22,6 +61,8 @@ pwd
 
 % run all closed-loop CPS examples
 reproduce % will take ~32.5 minutes (see run 140515 or 152224)
+
+
 
 %return; % stop here, comment/remove this to run all tests, other examples, etc.
 % if you run all these, it will add another ~15 minutes of runtime
@@ -67,10 +108,10 @@ run_all_tests(dir_results, disabledTests, i_d) % add directory for results input
 %
 % We do not batch all of these as the runtime for everything would be on 
 % the order of several days at least.
-'start nncs tests'
-cd /code/nnv/examples/NNCS/InvertedPendulum;
-reach_inverted_pendulum_control_sys;
-saveas(gcf, '/results/results_nncs_invpend_fig1.png')
+%'start nncs tests'
+%cd /code/nnv/examples/NNCS/InvertedPendulum;
+%reach_inverted_pendulum_control_sys;
+%saveas(gcf, '/results/results_nncs_invpend_fig1.png')
 
 %cd '/code/nnv/examples/NNCS/ACC/Verification/Scenarios 1'
 %verify_controller_3_20;
@@ -80,4 +121,4 @@ saveas(gcf, '/results/results_nncs_invpend_fig1.png')
 %reach_nncACCsystem;
 %saveas(gcf, '/results/results_nncs_acc_s2_fig1.png')
 
-'after nncs tests'
+%'after nncs tests'

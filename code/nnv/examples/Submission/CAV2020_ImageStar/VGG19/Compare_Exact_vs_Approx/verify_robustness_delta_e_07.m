@@ -2,10 +2,17 @@
 clc;
 clear;
 
+path_out = [path_results(), filesep, 'vgg19', filesep];
+
 fprintf('\n\n=============================LOAD VGG19 ======================\n');
 
 % Load the trained model 
-net = vgg19();
+if is_codeocean()
+    load('/data/vgg19_cache.mat');
+    net = net_vgg19;
+else
+    net = vgg19();
+end
 
 fprintf('\n\n======================== PARSING VGG19 =======================\n');
 nnvNet = CNN.parse(net, 'VGG19');
@@ -55,7 +62,7 @@ for i=1:n
 end
 
 
-save verificationResult_1e_07.mat robust_exact VT_exact robust_approx VT_approx;
+save([path_out, 'verificationResult_1e_07.mat', 'robust_exact', 'VT_exact', 'robust_approx', 'VT_approx');
 
 
 

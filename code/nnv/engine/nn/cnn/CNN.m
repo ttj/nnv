@@ -39,14 +39,7 @@ classdef CNN < handle
                     inputsize = varargin{3};
                     outputsize = varargin{4};
                     nL = length(Layers); % number of Layers
-                    for i=1:nL
-                        L = Layers{i};
-                        if ~isa(L, 'ImageInputLayer') && ~isa(L, 'BatchNormalizationLayer') && ~isa(L, 'AveragePooling2DLayer') && ~isa(L, 'Conv2DLayer') && ~isa(L, 'FullyConnectedLayer') && ~isa(L, 'MaxPooling2DLayer') && ~isa(L, 'ReluLayer')
-                            fprintf('\nCurrent version of NNV supports ImageInputLayer, AveragePooling2DLayer, Convolutional2DLayer, FullyConnectedLayer, MaxPooling2DLayer, AveragePooling2DLayer and ReluLayer');
-                            error('Element %d of Layers is not among supported layers in NNV', i);
-                        end
-                    end
-                    
+                                        
                     obj.Name = name;
                     obj.Layers = Layers;
                     obj.numLayers = nL;    % number of layers
@@ -230,8 +223,8 @@ classdef CNN < handle
                 label_id = cell(n, 1);
                 for i=1:n
                     rs = RS(i);                        
-                    new_rs  = ImageStar.reshape(rs, [obj.OutputSize 1 1]);                    
-                    max_id = new_rs.get_localMax_index([1 1], [obj.OutputSize 1], 1);
+                    new_rs  = ImageStar.reshape(rs, [obj.OutputSize(1) 1 1]);                    
+                    max_id = new_rs.get_localMax_index([1 1], [obj.OutputSize(1) 1], 1);
                     label_id{i} = max_id(:, 1);
                 end
 
@@ -341,6 +334,7 @@ classdef CNN < handle
                     robust = 2;
                     fprintf('\n=============================================');
                     fprintf('\nThe robustness of the network is UNCERTAIN due to the conservativeness of approximate analysis');
+                    fprintf('\nLabel index: %d', correct_id);
                     fprintf('\nPossible classified index: ');
                                        
                     n = length(incorrect_id_list);
@@ -459,7 +453,7 @@ classdef CNN < handle
     methods(Static)
        
         % parse a network from matlab for reachability analysis
-        function cnn = parse(net, name)
+        function cnn = parse(varargin)
             % @net: input network
             % @cnn: the cnn network for reachability analysis
             
@@ -472,6 +466,19 @@ classdef CNN < handle
             
             % author: Dung Tran
             % date: 7/16/2019
+            % update: 4/10/2020
+            
+            switch nargin
+                case 1
+                    net = varargin{1};
+                    name = 'parsed_net';
+                case 2
+                    net = varargin{1};
+                    name = varargin{2};
+                otherwise
+                    error('Invalid number of input arguments, should be 1 or 2');
+            end
+            
             
             
             n = length(net.Layers); % number of layers
@@ -483,7 +490,7 @@ classdef CNN < handle
             j = 0; % counter of number of layers
             for i=1:n
                 L = net.Layers(i);
-                if isa(L, 'nnet.cnn.layer.DropoutLayer') || isa(L, 'nnet.cnn.layer.SoftmaxLayer') || isa(L, 'nnet.cnn.layer.ClassificationOutputLayer')                  
+                if isa(L, 'nnet.cnn.layer.DropoutLayer') || isa(L, 'nnet.cnn.layer.SoftmaxLayer') || isa(L, 'nnet.cnn.layer.ClassificationOutputLayer')                   
                     fprintf('\nLayer %d is a %s class which is neglected in the analysis phase', i, class(L));                   
                     if isa(L, 'nnet.cnn.layer.ImageInputLayer')
                         inputSize = L.InputSize;
@@ -510,8 +517,7 @@ classdef CNN < handle
                     elseif isa(L, 'nnet.cnn.layer.FullyConnectedLayer')
                         Li = FullyConnectedLayer.parse(L);
                     elseif isa(L, 'nnet.cnn.layer.PixelClassificationLayer')
-                        'skipping pixel classification layer, todo add support'
-                        %Li = FullyConnectedLayer.parse(L);
+                        Li = PixelClassificationLayer.parse(L);
                     else                     
                         fprintf('\nLayer %d is a %s which have not supported yet in nnv, please consider removing this layer for the analysis', i, class(L));
                         error('\nUnsupported Class of Layer');                     
