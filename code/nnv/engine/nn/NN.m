@@ -47,6 +47,14 @@ classdef NN < handle
         input_vals = {}; % input values to each layer (cell array of cells of layer input values)
         input_sets = {}; % input set values for each layer (cell array of cells of layer input sets)
         dis_opt = []; % display option = 'display' or []
+        % acasxu Step 3 (nnenum-style over-approx subtree discharge): when
+        % subtreeDischarge is true and unsafeSpec (a HalfSpace / cell of HalfSpaces)
+        % is set, exact-star reach drops provably-safe sub-stars from the frontier
+        % between layers via a cheap approx-star tail pass -- killing safe subtrees
+        % before they explode. Sound: only stars whose over-approx provably avoids
+        % the unsafe region are dropped, so no counterexample is lost.
+        unsafeSpec = [];          % unsafe/not-robust region for mid-reach pruning
+        subtreeDischarge = false; % enable Step-3 discharge in exact-star reach
         lp_solver = 'linprog'; % choose linprog as default LP solver for constructing reachable set user can choose 'glpk' or 'linprog' as an LP solver
         matlabnet = []; % the matlab network this NN was created from
         
@@ -244,6 +252,17 @@ classdef NN < handle
                 if isfield(reachOptions, 'lp_solver')
                     obj.lp_solver = reachOptions.lp_solver;
                 end
+                % acasxu Step 3 plumbing (default off / no spec -> unchanged behavior)
+                if isfield(reachOptions, 'unsafeSpec')
+                    obj.unsafeSpec = reachOptions.unsafeSpec;
+                else
+                    obj.unsafeSpec = [];
+                end
+                if isfield(reachOptions, 'subtreeDischarge')
+                    obj.subtreeDischarge = reachOptions.subtreeDischarge;
+                else
+                    obj.subtreeDischarge = false;
+                end
             end
 
             % SOUNDNESS [42]: determine whether this reach is provably EXACT, and
@@ -431,6 +450,17 @@ classdef NN < handle
                 end
                 if isfield(reachOptions, 'lp_solver')
                     obj.lp_solver = reachOptions.lp_solver;
+                end
+                % acasxu Step 3 plumbing (default off / no spec -> unchanged behavior)
+                if isfield(reachOptions, 'unsafeSpec')
+                    obj.unsafeSpec = reachOptions.unsafeSpec;
+                else
+                    obj.unsafeSpec = [];
+                end
+                if isfield(reachOptions, 'subtreeDischarge')
+                    obj.subtreeDischarge = reachOptions.subtreeDischarge;
+                else
+                    obj.subtreeDischarge = false;
                 end
             end
 
@@ -1526,12 +1556,54 @@ classdef NN < handle
                 start_time = tic;
                 disp(['Reachability for layer ' num2str(i-1) ' :'])
                 rs_new = obj.Layers{i-1}.reach(rs, obj.reachMethod, obj.reachOption, obj.relaxFactor, obj.dis_opt, obj.lp_solver);
+                % acasxu Step 3: discharge provably-safe sub-stars from the frontier
+                % before the next layer (only when enabled, exact-star, a spec is set,
+                % and the frontier is large enough to be worth the relaxed tail pass).
+                if obj.subtreeDischarge && strcmp(obj.reachMethod, 'exact-star') ...
+                        && ~isempty(obj.unsafeSpec) && isa(rs_new, 'Star') ...
+                        && numel(rs_new) > 256 && (i-1) < obj.numLayers
+                    rs_new = obj.prune_frontier(rs_new, i-1, obj.unsafeSpec);
+                end
                 obj.reachTime(i-1) = toc(start_time); % track reach time for each layer
                 rs = rs_new; % get input set to next layer
                 obj.reachSet{i-1} = rs_new; % store output set for layer
             end
             % Output
             outSet = rs_new;
+        end
+
+        % acasxu Step 3: drop provably-safe sub-stars from an exact-star frontier.
+        function frontier = prune_frontier(obj, rs, layerIdx, spec)
+            % For each star, over-approximate the REMAINING layers with approx-star;
+            % if that over-approx provably avoids the unsafe region, the star's exact
+            % subtree is also safe (the over-approx contains it), so the star can be
+            % dropped with no loss of any counterexample. Sound by construction; a
+            % failed over-approx keeps the star (never drop on error).
+            n = numel(rs);
+            keep = true(1, n);
+            for j = 1:n
+                try
+                    R_over = obj.reach_tail_approx(rs(j), layerIdx + 1);
+                    if verify_specification(R_over, spec) == 1   % 1 = no unsafe intersection
+                        keep(j) = false;                         % provably safe -> discharge
+                    end
+                catch
+                    % keep the star (sound: never drop on an over-approx failure)
+                end
+            end
+            frontier = rs(keep);
+            if strcmp(obj.dis_opt, 'display')
+                fprintf('\n  [Step3] discharged %d/%d safe sub-stars at layer %d', ...
+                    n - numel(frontier), n, layerIdx);
+            end
+        end
+
+        % Cheap approx-star (triangle-relaxation) over-approx of the tail layers.
+        function R = reach_tail_approx(obj, s, startIdx)
+            R = s;
+            for k = startIdx:obj.numLayers
+                R = obj.Layers{k}.reach(R, 'approx-star', [], 0, [], obj.lp_solver);
+            end
         end
 
         % reach NN based on connections table (test it)

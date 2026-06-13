@@ -248,7 +248,15 @@ if status == 2 && ~quickRun % no counterexample found and supported for reachabi
             while ~isempty(reachOptionsList)
                 
                 reachOptions = reachOptionsList{1};
-    
+                % acasxu Step 3: enable over-approx subtree discharge for exact-star on
+                % acasxu, threading the unsafe spec so reach can prune provably-safe
+                % sub-stars mid-network. Off elsewhere (sound + behavior-preserving).
+                if contains(category, "acasxu") && isfield(reachOptions, 'reachMethod') ...
+                        && strcmp(reachOptions.reachMethod, 'exact-star')
+                    reachOptions.subtreeDischarge = true;
+                    reachOptions.unsafeSpec = prop;
+                end
+
                 IS = create_input_set(lb, ub, inputSize, needReshape, useImageStar);
 
                 % Compute reachability. Reach may FAIL LOUD by design (layers
