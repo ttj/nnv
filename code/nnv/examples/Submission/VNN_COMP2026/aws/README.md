@@ -28,10 +28,22 @@ migration branch — switch to `master` after merge), `RUN_BENCH_SETUP=0` to ski
 `*_REPO` overrides. Provision the MATLAB license separately (file `.lic` into
 `~/.matlab/R2026a_licenses/`, or `MLM_LICENSE_FILE=port@host`, or the AMI's online sign-in).
 
+## Pre-sweep gate (run this FIRST, every time)
+
+```bash
+bash smoke_test_benchmarks.sh           # 1 instance/benchmark, short timeout; flags ERRORING benchmarks
+```
+Runs one representative instance per benchmark through the **same `run_vnncomp_instance` path the
+sweep uses**, so it catches load/ONNX-import/dispatch breakage (and, once GPU-BaB is routed, any
+GPU-BaB breakage) in minutes — before a multi-hour sweep is wasted. Exits non-zero if any benchmark
+errors. Run it before every sweep and after any benchmark or NNV code change. Known errored
+benchmarks to clear first are tracked in the status repo (`sweeps/.../ERRORS_TO_FIX.md`).
+
 ## Sweep workflow
 
 | Script | Role |
 |--------|------|
+| `smoke_test_benchmarks.sh` | **Pre-sweep gate** (above): 1 instance/benchmark, reports erroring benchmarks. |
 | `overnight_sweep.sh` | Full 2026 sweep: 11 concurrent `matlab -batch` workers over benchmark folder-groups, 300 s/instance, timestamped CSVs. Checks out `NNV_BRANCH` (default migration branch) and parse-guards `run_all_benchmarks.m`. |
 | `disk_guard.sh` | Reclaims decompressed `.onnx` files (each has a `.gz` sibling) during the sweep so the disk doesn't fill. |
 | `harvest_and_selfstop.sh` | Waits for the sweep to finish, tars results onto the persistent EBS, then **stops** (not terminates) the box to save cost. |
