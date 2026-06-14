@@ -16,7 +16,11 @@ function res = gpu_bab_first_pass(category, onnx, vnnlib, opts)
     if nargin < 4, opts = struct(); end
     res = struct('verdict','error','target',NaN,'nClasses',NaN,'guardErr',NaN,'nodes',0,'reason','');
     try
-        [~, nnvnet, needReshape, ~, inputSize, ~, ~, ~] = load_vnncomp_network(category, onnx, vnnlib);
+        % Load the net with the EXACT import format + needReshape run_vnncomp_instance uses.
+        % load_vnncomp_network is a local function there (not callable here), so we replicate
+        % ONLY the confirmed image paths; other categories error (sound-by-refusal -- a wrong
+        % needReshape would mis-orient the box => -150). needReshape is -150-critical.
+        [nnvnet, needReshape, inputSize] = i_load_net(category, onnx);
         property = load_vnnlib(vnnlib);
         lb = property.lb; ub = property.ub;
         if iscell(lb), lb = lb{1}; ub = ub{1}; end           % first input set (first-pass)
@@ -37,6 +41,25 @@ function res = gpu_bab_first_pass(category, onnx, vnnlib, opts)
     catch ME
         res.verdict = 'error'; res.reason = ME.message;
     end
+end
+
+function [nnvnet, needReshape, inShape] = i_load_net(category, onnx)
+% Replicate ONLY the CONFIRMED image-benchmark import path from load_vnncomp_network
+% (run_vnncomp_instance.m). cifar100 / challenging: BCSS import, OutputDataFormats BC,
+% needReshape=1 (verified in source, line ~632). Other categories ERROR -- their needReshape
+% is uncertain (tinyimagenet ?, vggnet "%?") and a wrong value mis-orients the box (-150), so
+% we refuse rather than guess. Extend ONLY after confirming a category's exact orientation.
+    cat = lower(string(category));
+    if contains(cat, 'cifar100') || contains(cat, 'challenging')
+        net = importNetworkFromONNX(onnx, "InputDataFormats","BCSS", "OutputDataFormats","BC");
+        nnvnet = matlab2nnv(net);
+        needReshape = 1;
+    else
+        error('gpu_bab_first_pass:unconfirmedOrientation', ...
+            ['image first-pass loader supports only cifar100/challenging (confirmed ' ...
+             'needReshape); got "%s" -- refused (a guessed needReshape would be -150-unsafe).'], category);
+    end
+    inShape = nnvnet.Layers{1}.InputSize;
 end
 
 function [blb, bub] = i_netorder_box(lb, ub, inputSize, needReshape)
