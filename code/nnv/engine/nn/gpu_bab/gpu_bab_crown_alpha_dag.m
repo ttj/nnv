@@ -51,44 +51,63 @@ function [margins, unstable, preL, preU] = gpu_bab_crown_alpha_dag(ops, x_lb, x_
     % ---- flat alpha vector (min-area init) ----
     rdims = arrayfun(@(k) size(preL{k},1), reluIdx);
     offsets = [0; cumsum(rdims(:) * B)];
-    a0 = zeros(offsets(end), 1, precision);
+    nP = offsets(end);
+    a0 = zeros(nP, 1, precision);
+    fixSign = cell(nOps, 1); fixedMask = zeros(nP, 1, precision);
     for r = 1:numel(reluIdx)
         k = reluIdx(r);
         a = zeros(size(preL{k}), precision);
         uns = unsM{k} > 0;
         a(uns) = cast(preU{k}(uns) >= -preL{k}(uns), precision);   % min-area binary {0,1}
         a0(offsets(r)+1 : offsets(r+1)) = a(:);
+        % BETA: per-node split-constraint sign (s_i = +1 active fix / -1 inactive fix / 0 free).
+        % beta is a free dual ONLY on fixed neurons -> at the root (no fixings) fixedMask=0 ->
+        % beta stays 0 -> this reduces EXACTLY to pure alpha (parity gate preserved).
+        if ~isempty(fixings) && numel(fixings) >= k && ~isempty(fixings{k})
+            fs = cast(fixings{k}, precision);
+        else
+            fs = zeros(size(preL{k}), precision);
+        end
+        fixSign{k} = fs;
+        fixedMask(offsets(r)+1 : offsets(r+1)) = cast(fs(:) ~= 0, precision);
     end
-    alphaVec = dlarray(a0);
+    pVec = dlarray([a0; zeros(nP, 1, precision)]);   % [alpha; beta], alpha=min-area, beta=0
 
     if nIter <= 0
-        margins = i_dag_back(ops, preL, actM, unsM, auC, buC, x_lb, x_ub, C, precision, ...
-                             alphaVec, reluIdx, rdims, offsets, B, nSpec);
+        margins = i_dag_back(ops, preL, actM, unsM, auC, buC, fixSign, x_lb, x_ub, C, precision, ...
+                             pVec, reluIdx, rdims, offsets, nP, B, nSpec);
         margins = i_g(margins);
         return;
     end
 
-    % ---- projected gradient ascent (normalized step + keep-best) ----
-    % SOUNDNESS: keep-best + the final re-evaluation at bestVec mean the returned bound is >= the
-    % min-area bound regardless of the optimizer -- if the autodiff tape is severed (a non-traced
-    % conv/pool adjoint -> dlgradient errors), we CATCH it and return the min-area bound (sound,
-    % no improvement), never an error and never an unsound bound.
-    m0 = i_dag_back(ops, preL, actM, unsM, auC, buC, x_lb, x_ub, C, precision, ...
-                    alphaVec, reluIdx, rdims, offsets, B, nSpec);
-    bestObj = i_g(sum(min(m0,[],1), 'all')); bestVec = alphaVec;
+    % ---- projected gradient ascent over [alpha; beta] (Adam, keep-best) ----
+    % SOUNDNESS: the bound is max_{alpha in[0,1], beta>=0} min_x [C*f(x) - sum beta_i s_i z_i] over
+    % the clamped box -- a valid lower bound for ANY alpha in [0,1], beta>=0 (sound ReLU relaxation
+    % + weak Lagrangian duality on the split constraints). keep-best + the final re-eval at bestVec
+    % mean the returned bound is >= the min-area/beta=0 bound regardless of the optimizer; a severed
+    % autodiff tape is CAUGHT -> min-area fallback (sound, no improvement), never error/unsound.
+    m0 = i_dag_back(ops, preL, actM, unsM, auC, buC, fixSign, x_lb, x_ub, C, precision, ...
+                    pVec, reluIdx, rdims, offsets, nP, B, nSpec);
+    bestObj = i_g(sum(min(m0,[],1), 'all')); bestVec = pVec;
+    mt = zeros(2*nP, 1, precision); vt = zeros(2*nP, 1, precision);
+    b1 = 0.9; b2 = 0.999; epsA = cast(1e-8, precision);
     try
         for it = 1:nIter
-            [~, grad] = dlfeval(@(av) i_aloss(ops, preL, actM, unsM, auC, buC, ...
-                                x_lb, x_ub, C, precision, av, reluIdx, rdims, offsets, B, nSpec), alphaVec);
+            [~, grad] = dlfeval(@(p) i_aloss(ops, preL, actM, unsM, auC, buC, fixSign, ...
+                                x_lb, x_ub, C, precision, p, reluIdx, rdims, offsets, nP, B, nSpec), pVec);
             g = extractdata(grad);
-            if ~any(g(:)), break; end                  % zero gradient (tape didn't reach alpha) -> stop
-            g = g / (max(abs(g(:))) + eps(precision));
-            v = extractdata(alphaVec) - lr * g; v = max(min(v,1),0);
-            alphaVec = dlarray(v);
-            m = i_dag_back(ops, preL, actM, unsM, auC, buC, x_lb, x_ub, C, precision, ...
-                           alphaVec, reluIdx, rdims, offsets, B, nSpec);
+            if ~any(g(:)), break; end                  % zero gradient (tape didn't reach params) -> stop
+            mt = b1*mt + (1-b1)*g;
+            vt = b2*vt + (1-b2)*g.^2;
+            mhat = mt / (1 - b1^it); vhat = vt / (1 - b2^it);
+            v = extractdata(pVec) - lr * mhat ./ (sqrt(vhat) + epsA);
+            v(1:nP)      = max(min(v(1:nP), 1), 0);            % alpha in [0,1]
+            v(nP+1:end)  = max(v(nP+1:end), 0) .* fixedMask;   % beta >= 0, only on fixed neurons
+            pVec = dlarray(v);
+            m = i_dag_back(ops, preL, actM, unsM, auC, buC, fixSign, x_lb, x_ub, C, precision, ...
+                           pVec, reluIdx, rdims, offsets, nP, B, nSpec);
             obj = i_g(sum(min(m,[],1), 'all'));
-            if obj > bestObj, bestObj = obj; bestVec = alphaVec; end
+            if obj > bestObj, bestObj = obj; bestVec = pVec; end
         end
     catch ME
         if ~any(strcmp(ME.identifier, {'MATLAB:dlarray:GradientNotTraced', ...
@@ -97,23 +116,24 @@ function [margins, unstable, preL, preU] = gpu_bab_crown_alpha_dag(ops, x_lb, x_
             % bound; swallow to stay sound-or-unknown rather than throw out of the precheck.
         end
     end
-    margins = i_dag_back(ops, preL, actM, unsM, auC, buC, x_lb, x_ub, C, precision, ...
-                         bestVec, reluIdx, rdims, offsets, B, nSpec);
+    margins = i_dag_back(ops, preL, actM, unsM, auC, buC, fixSign, x_lb, x_ub, C, precision, ...
+                         bestVec, reluIdx, rdims, offsets, nP, B, nSpec);
     margins = i_g(margins);
 end
 
 % =====================================================================================
-function [loss, grad] = i_aloss(ops, preL, actM, unsM, auC, buC, x_lb, x_ub, C, precision, alphaVec, reluIdx, rdims, offsets, B, nSpec)
-    margins = i_dag_back(ops, preL, actM, unsM, auC, buC, x_lb, x_ub, C, precision, alphaVec, reluIdx, rdims, offsets, B, nSpec);
+function [loss, grad] = i_aloss(ops, preL, actM, unsM, auC, buC, fixSign, x_lb, x_ub, C, precision, pVec, reluIdx, rdims, offsets, nP, B, nSpec)
+    margins = i_dag_back(ops, preL, actM, unsM, auC, buC, fixSign, x_lb, x_ub, C, precision, pVec, reluIdx, rdims, offsets, nP, B, nSpec);
     loss = -sum(min(margins, [], 1), 'all');
-    grad = dlgradient(loss, alphaVec);
+    grad = dlgradient(loss, pVec);
 end
 
 % =====================================================================================
-function margins = i_dag_back(ops, preL, actM, unsM, auC, buC, x_lb, x_ub, C, precision, alphaVec, reluIdx, rdims, offsets, B, nSpec)
+function margins = i_dag_back(ops, preL, actM, unsM, auC, buC, fixSign, x_lb, x_ub, C, precision, pVec, reluIdx, rdims, offsets, nP, B, nSpec)
 % Backward CROWN over the FULL DAG (spec_dag's backward), with the unstable ReLU LOWER slope
-% supplied by alpha (al = actM + unsM.*alpha) instead of the fixed min-area choice. au/bu are
-% the precomputed constants. Op-for-op identical to gpu_bab_crown_spec_dag when alpha=min-area.
+% supplied by alpha (al = actM + unsM.*alpha) AND the beta split-dual subtracted at each ReLU
+% (-beta_k*s_k on z_k). au/bu are precomputed constants. With alpha=min-area and beta=0 this is
+% op-for-op identical to gpu_bab_crown_spec_dag.
     nOps = numel(ops); n = size(x_lb, 1);
     skipA = cell(nOps, 1);
     skipA{nOps} = repmat(cast(C, precision), 1, 1, B);
@@ -152,12 +172,16 @@ function margins = i_dag_back(ops, preL, actM, unsM, auC, buC, x_lb, x_ub, C, pr
             case 'relu'
                 r = find(reluIdx == k, 1);
                 dim = rdims(r);
-                alpha_k = reshape(alphaVec(offsets(r)+1 : offsets(r+1)), dim, B);
+                alpha_k = reshape(pVec(offsets(r)+1 : offsets(r+1)), dim, B);
+                beta_k  = reshape(pVec(nP + offsets(r)+1 : nP + offsets(r+1)), dim, B);
                 au = auC{k}; bu = buC{k};
                 al = actM{k} + unsM{k} .* alpha_k;
                 Apos = max(A, 0); Aneg = min(A, 0);
                 d = d + reshape(pagemtimes(Aneg, reshape(bu, dim, 1, B)), nSpec, B);
                 A = Apos .* reshape(al, 1, dim, B) + Aneg .* reshape(au, 1, dim, B);
+                % BETA split-dual: subtract beta_k*s_k from the coefficient on z_k (all spec rows).
+                % Zero at the root / unfixed neurons (beta=0 there) -> reduces to pure alpha.
+                A = A - reshape(beta_k .* fixSign{k}, 1, dim, B);
             otherwise
                 error('gpu_bab_crown_alpha_dag:op', ...
                     'Unsupported op "%s" (affine/conv/normaffine/avgpool/relu/add only).', op.type);

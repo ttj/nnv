@@ -44,9 +44,11 @@ function [status, info] = gpu_bab_relu_split_batched(ops, x_lb, x_ub, trueLabel,
     margin      = cast(i_get(opts, 'margin', 0), precision);
     nSample     = i_get(opts, 'nSample', 16);
     rootTight   = i_get(opts, 'rootTight', true);   % root-tight intermediate-bound reuse (#1 tightness lever)
-    alphaIter   = i_get(opts, 'alphaIter', 0);      % alpha-CROWN slope-opt iters per batched node bound (0 = off; FC only)
+    alphaIter   = i_get(opts, 'alphaIter', 0);      % alpha-CROWN slope-opt iters per batched node bound (0 = off)
     alphaLr     = i_get(opts, 'alphaLr', 0.2);
     betaIter    = i_get(opts, 'betaIter', 0);       % beta-CROWN split-dual iters (>0 -> JOINT alpha+beta; FC only)
+    ev = getenv('NNV_BAB_ALPHA_ITERS'); if ~isempty(ev), alphaIter = str2double(ev); end   % dev knob: per-node alpha
+    ev = getenv('NNV_BAB_ALPHA_LR');    if ~isempty(ev), alphaLr   = str2double(ev); end
 
     % Supported ops: affine/relu (FC) + conv/normaffine/avgpool/add (SEQUENTIAL + residual-DAG
     % conv nets). The batched bounding (gpu_bab_crown_spec_dag) is sound for these -- conv/BN/
@@ -95,6 +97,18 @@ function [status, info] = gpu_bab_relu_split_batched(ops, x_lb, x_ub, trueLabel,
                 min(mRoot), median(mRoot), numel(mRoot), precision);
         end
         rootBounds = struct('preL', {rtL}, 'preU', {rtU});
+        if ~isempty(getenv('NNV_DEBUG_ALPHADAG'))     % de-risk probe: does alpha-CROWN close the root margin?
+            nit = str2double(getenv('NNV_ALPHADAG_ITERS')); if isnan(nit), nit = 20; end
+            try
+                m_a0 = gpu_bab_crown_alpha_dag(ops, x_lb, x_ub, C, cell(nOps,1), reluIdx, precision, 0,   0.2, rootBounds);
+                m_aN = gpu_bab_crown_alpha_dag(ops, x_lb, x_ub, C, cell(nOps,1), reluIdx, precision, nit, 0.2, rootBounds);
+                cert = 'still<0'; if min(m_aN(:)) > 0, cert = 'CERTIFIES'; end
+                fprintf('[alpha-dag] root: minarea=%.6g  alpha(%dit)=%.6g  gain=%.4g  %s\n', ...
+                    min(m_a0(:)), nit, min(m_aN(:)), min(m_aN(:))-min(m_a0(:)), cert);
+            catch ME
+                fprintf('[alpha-dag] root probe errored: %s\n', ME.message);
+            end
+        end
         preL = cell(nOps,1); preU = cell(nOps,1);
         for r = 1:numel(reluIdx), k = reluIdx(r); preL{k} = gather(rtL{k}); preU{k} = gather(rtU{k}); end
     else
@@ -192,7 +206,20 @@ function [margins, preL, preU, infeasible] = i_bound_batch(ops, reluIdx, x_lb, x
     if nargin < 11 || isempty(alphaLr), alphaLr = 0.2; end
     if nargin < 12 || isempty(betaIter), betaIter = 0; end
     LB = repmat(x_lb, 1, B); UB = repmat(x_ub, 1, B);
-    if betaIter > 0
+    % SOUNDNESS (MUST-FIX, adversarial review): the FC-only backwards (alpha_fix / alpha_beta)
+    % treat every non-affine op as a ReLU -> a conv op there is mis-bounded with NO conv adjoint
+    % (fail-OPEN false robust). So for a DAG net (conv/pool/normaffine/add) route ONLY to the
+    % conv-capable backwards: alpha_dag (alpha-CROWN) or spec_dag (fixed slope). beta is FC-only
+    % (no conv beta backward yet) -> it is SILENTLY DROPPED for conv (sound: alpha-only is a valid
+    % bound). gpu_bab_crown_alpha_dag's parity gate guarantees it == spec_dag at min-area alpha.
+    isDAG = any(cellfun(@(o) any(strcmp(o.type, {'conv','normaffine','avgpool','add'})), ops));
+    if isDAG
+        if alphaIter > 0
+            [m, ~, pL, pU] = gpu_bab_crown_alpha_dag(ops, LB, UB, C, fixc, reluIdx, precision, alphaIter, alphaLr, rootBounds);
+        else
+            [m, pL, pU] = gpu_bab_crown_spec_dag(ops, LB, UB, C, precision, fixc, rootBounds);
+        end
+    elseif betaIter > 0
         [m, ~, pL, pU] = gpu_bab_crown_alpha_beta(ops, LB, UB, C, fixc, reluIdx, precision, max(alphaIter,betaIter), alphaLr, rootBounds);
     elseif alphaIter > 0
         [m, ~, pL, pU] = gpu_bab_crown_alpha_fix(ops, LB, UB, C, fixc, reluIdx, precision, alphaIter, alphaLr, rootBounds);
