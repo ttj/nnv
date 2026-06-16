@@ -36,9 +36,21 @@ function [margins, preL, preU, unstable] = gpu_bab_crown_tight(ops, x_lb, x_ub, 
             % ops[1..src], reusing preL/preU of strictly-earlier ReLUs/maxpools (sound by induction).
             src = ops{k}.src;
             if src == 0, nk = numel(x_lb); else, nk = i_layer_width(ops, src); end
-            Ck = eye(nk, precision);
-            pu = i_backward(ops, src, Ck, x_lb, x_ub, preL, preU, precision, false);
-            pl = i_backward(ops, src, Ck, x_lb, x_ub, preL, preU, precision, true);
+            % TILE the identity seed so the per-layer backward is FEASIBLE at conv widths. A full
+            % eye(nk) seed makes i_backward O(nk^2) in memory/time (nk~16k for conv -> OOM); this is
+            % exactly why crown_tight was conv-infeasible. Batching the rows of eye(nk) yields the
+            % IDENTICAL bounds (each output element is bounded independently by its identity row), at
+            % bounded memory (tile x intermediate-widths). FC nets (nk <= tile) run in a single tile
+            % -> byte-identical to the old code; only large conv layers split.
+            pu = zeros(nk, 1, precision); pl = zeros(nk, 1, precision);
+            tile = i_seed_tile(nk);
+            for s = 1:tile:nk
+                e = min(s + tile - 1, nk); rows = (s:e);
+                Ck = zeros(numel(rows), nk, precision);
+                Ck(sub2ind(size(Ck), 1:numel(rows), rows)) = 1;     % rows s..e of eye(nk)
+                pu(rows) = i_backward(ops, src, Ck, x_lb, x_ub, preL, preU, precision, false);
+                pl(rows) = i_backward(ops, src, Ck, x_lb, x_ub, preL, preU, precision, true);
+            end
             if strcmp(tk, 'relu') && ~isempty(fixings) && numel(fixings) >= k && ~isempty(fixings{k})
                 fx = fixings{k};                    % BaB node: clamp fixed neurons + propagate
                 pl(fx == 1)  = max(pl(fx == 1),  0);
@@ -68,6 +80,14 @@ function w = i_layer_width(ops, upto)
         end
     end
     error('gpu_bab_crown_tight:nolinear', 'no affine/conv op before index %d', upto);
+end
+
+function tile = i_seed_tile(nk)
+% Row-batch size for the eye(nk) intermediate-bound seed. Small nets (FC, nk<=512) run in a single
+% tile (byte-identical to the old code). Large conv layers (nk~16k) split into 512-row batches so the
+% backward's peak memory (tile x intermediate-widths) stays bounded -- the change that makes
+% crown_tight feasible at conv widths. Bounds are batch-invariant (each row independent) -> exact.
+    tile = min(nk, 512);
 end
 
 function bound = i_backward(ops, upto, A0, x_lb, x_ub, preL, preU, precision, lower)

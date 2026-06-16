@@ -762,12 +762,18 @@ function [status, reachOptionsList] = i_gpu_bab_precheck(category, nnvnet, lb, u
     % DOUBLE-precision confirm; GPU-single is just a fast filter that can never emit a verdict.
     % FC nets are cheap in double -> single-stage CPU-double (maxNodes 5000). No GPU -> conv also
     % falls back to CPU-double (slow but sound).
+    % Conv frontier cap: the batched spec-backward holds ~nSpec*maxFeatureMap*frontier floats;
+    % at the default frontier 512 a cifar100 resnet (nSpec=99, feat~65k) needs ~13 GB -> GPU OOM.
+    % A small frontier fits memory (more rounds, SAME node budget -> identical sound verdict).
+    convFrontier = 32; convMaxNodes = 2048;
+    ev = getenv('NNV_CONV_MAXNODES'); if ~isempty(ev), convMaxNodes = str2double(ev); end   % tuning knob (verdict-safe: budget only)
+    ev = getenv('NNV_CONV_FRONTIER'); if ~isempty(ev), convFrontier = str2double(ev); end    % tuning knob (memory only)
     try
         if isConv && gpuDeviceCount >= 1
             [gv, ginfo] = gpu_bab_try_verify(nnvnet, lb, ub, prop, ...
-                struct('engine','batched','maxNodes',64,'device','gpu','allowUnsoundSingle',true));
+                struct('engine','batched','maxNodes',convMaxNodes,'maxFrontier',convFrontier,'device','gpu','allowUnsoundSingle',true));
             if strcmp(gv, 'robust')
-                [gv2, gi2] = gpu_bab_try_verify(nnvnet, lb, ub, prop, struct('engine','batched','maxNodes',64));  % CPU double = sound emit
+                [gv2, gi2] = gpu_bab_try_verify(nnvnet, lb, ub, prop, struct('engine','batched','maxNodes',convMaxNodes,'maxFrontier',convFrontier));  % CPU double = sound emit
                 if strcmp(gv2, 'robust')
                     status = 1; reachOptionsList = {};
                     fprintf('GPU-BaB pre-check: robust/unsat (gpu-screen + %d-node double-confirm) -> skip Star\n', gi2.nodes);
@@ -778,8 +784,10 @@ function [status, reachOptionsList] = i_gpu_bab_precheck(category, nnvnet, lb, u
                 fprintf('GPU-BaB pre-check: %s (gpu-screen, %s) -> Star reach\n', gv, ginfo.reason);
             end
         else
-            mn = 5000; if isConv, mn = 64; end                 % conv-without-GPU: bounded (slow but sound)
-            [gv, ginfo] = gpu_bab_try_verify(nnvnet, lb, ub, prop, struct('engine','batched','maxNodes',mn));
+            mn = 5000; if isConv, mn = 2048; end               % conv: tiled crown_tight root is near-certifying (min margin ~-0.5); BaB needs >64 nodes to close it
+            mopts = struct('engine','batched','maxNodes',mn);
+            if isConv, mopts.maxFrontier = convFrontier; end    % conv: cap frontier (memory) even on CPU
+            [gv, ginfo] = gpu_bab_try_verify(nnvnet, lb, ub, prop, mopts);
             if strcmp(gv, 'robust')
                 status = 1; reachOptionsList = {};
                 fprintf('GPU-BaB pre-check: robust/unsat (%d nodes, %s) -> skip Star reach\n', ginfo.nodes, ginfo.reason);

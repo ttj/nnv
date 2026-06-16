@@ -187,6 +187,10 @@ function [verdict, info] = gpu_bab_try_verify(net, lb, ub, target, opts)
             end
         otherwise
             verdict = 'unknown';
+            if isfield(binfo, 'reason') && ~isempty(binfo.reason)   % why BaB gave up (budget vs convex barrier)
+                info.reason = sprintf('%s (nodes=%d, rounds=%d)', binfo.reason, ...
+                    i_optget(binfo,'nodes',0), i_optget(binfo,'rounds',0));
+            end
     end
 end
 

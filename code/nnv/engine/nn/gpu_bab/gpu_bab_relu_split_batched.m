@@ -90,6 +90,10 @@ function [status, info] = gpu_bab_relu_split_batched(ops, x_lb, x_ub, trueLabel,
     if rootTight
         [mRoot, rtL, rtU] = gpu_bab_crown_tight(ops, x_lb, x_ub, C, precision, cell(nOps,1));
         mRoot = gather(mRoot(:));
+        if ~isempty(getenv('NNV_DEBUG_ROOTMARGIN'))   % de-risk telemetry only (env-gated)
+            fprintf('[rootTight] crown_tight root margin: min=%.6g median=%.6g (n=%d, %s)\n', ...
+                min(mRoot), median(mRoot), numel(mRoot), precision);
+        end
         rootBounds = struct('preL', {rtL}, 'preU', {rtU});
         preL = cell(nOps,1); preU = cell(nOps,1);
         for r = 1:numel(reluIdx), k = reluIdx(r); preL{k} = gather(rtL{k}); preU{k} = gather(rtU{k}); end
@@ -104,7 +108,7 @@ function [status, info] = gpu_bab_relu_split_batched(ops, x_lb, x_ub, trueLabel,
     for r = 1:numel(reluIdx), reluDim(reluIdx(r)) = size(preL{reluIdx(r)}, 1); end
     [sK, sJ, hasS] = i_pick_splits(reluIdx, preL, preU, cell(nOps,1), 1);
     if ~hasS
-        status = 'unknown'; return;                 % root undecided, nothing to split
+        status = 'unknown'; info.reason = 'root undecided; no unstable neuron to split (convex barrier)'; return;
     end
     % stack as per-relu fixing matrices fixStack{k} = [dim_k x M]; seed with root's 2 children.
     fixStack = cell(nOps, 1);
@@ -118,7 +122,7 @@ function [status, info] = gpu_bab_relu_split_batched(ops, x_lb, x_ub, trueLabel,
         info.rounds = info.rounds + 1;
         info.maxStack = max(info.maxStack, M);
         if M > maxStack
-            status = 'unknown'; return;             % live set too large (memory guard)
+            status = 'unknown'; info.reason = sprintf('maxStack exceeded (%d > %d; memory)', M, maxStack); return;
         end
         B = min(maxFrontier, M);
         cols = (M - B + 1):M;                       % pop the top B nodes (LIFO -> DFS)
@@ -128,7 +132,7 @@ function [status, info] = gpu_bab_relu_split_batched(ops, x_lb, x_ub, trueLabel,
         M = M - B;
         info.nodes = info.nodes + B;
         if info.nodes > maxNodes
-            status = 'unknown'; return;
+            status = 'unknown'; info.reason = sprintf('maxNodes budget exhausted (%d > %d)', info.nodes, maxNodes); return;
         end
 
         % bound the popped batch (reusing the tight root bounds, clamped per node, if rootTight)
@@ -151,7 +155,7 @@ function [status, info] = gpu_bab_relu_split_batched(ops, x_lb, x_ub, trueLabel,
         % split each undecided node on its largest-gap unstable unfixed neuron
         [sK, sJ, hasS] = i_pick_splits(reluIdx, preL, preU, fixc, undec);
         if ~all(hasS)
-            status = 'unknown'; return;             % an undecided node cannot be split
+            status = 'unknown'; info.reason = 'undecided node has no unstable unfixed neuron (convex barrier; needs alpha/beta or input-split)'; return;
         end
 
         % push the two children of every undecided node onto the stack
