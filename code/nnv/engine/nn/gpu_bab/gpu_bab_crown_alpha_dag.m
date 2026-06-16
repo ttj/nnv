@@ -280,20 +280,24 @@ function [olb, oub] = i_conv_ibp(op, lb, ub, precision)
 end
 
 function [A2, d2] = i_conv_backward(A, d, op, precision)
+% Exact CROWN backward through a conv (linear), batched over B. TRACEABLE for dlgradient:
+% A4 stays an (unformatted) dlarray, dltranspconv uses DataFormat, and the crop/pad/bias are
+% slice+cat+sum (no extractdata, no indexed-assignment-into-zeros) so alpha's gradient flows.
     nSpec = size(A,1); B = size(A,3);
     osh = op.outShape; ish = op.inShape; W = cast(op.W, precision);
     Aperm = permute(A, [2 1 3]);
-    A4 = dlarray(reshape(Aperm, [osh(1) osh(2) osh(3) nSpec*B]), 'SSCB');
-    Afull = extractdata(dltranspconv(A4, W, 0, 'Stride', op.stride, 'Cropping', 0, 'DilationFactor', op.dil));
+    A4 = reshape(Aperm, [osh(1) osh(2) osh(3) nSpec*B]);
+    if ~isa(A4, 'dlarray'), A4 = dlarray(A4); end                 % unformatted dlarray (trace preserved)
+    Afull = dltranspconv(A4, W, 0, 'Stride', op.stride, 'Cropping', 0, ...
+                         'DilationFactor', op.dil, 'DataFormat', 'SSCB');
     pt = op.pad(1); pl = op.pad(3);
-    Ain = zeros([ish(1) ish(2) ish(3) nSpec*B], 'like', Afull);
     hi = min(ish(1), size(Afull,1)-pt); wi = min(ish(2), size(Afull,2)-pl);
-    if hi>0 && wi>0, Ain(1:hi,1:wi,:,:) = Afull(pt+(1:hi), pl+(1:wi), :, :); end
-    A2 = reshape(Ain, [prod(ish) nSpec B]);
-    A2 = permute(A2, [2 1 3]);
+    Ain = Afull(pt+(1:hi), pl+(1:wi), :, :);                       % traceable slice
+    if hi < ish(1) || wi < ish(2), Ain = i_zeropad_hw(Ain, ish(1), ish(2)); end
+    A2 = permute(reshape(Ain, [prod(ish) nSpec B]), [2 1 3]);
     bc = reshape(cast(op.b(:), precision), [1 1 osh(3)]);
-    A4d = reshape(extractdata(A4), [osh(1) osh(2) osh(3) nSpec B]);
-    dinc = reshape(sum(A4d .* bc, [1 2 3]), [nSpec B]);
+    A4u = reshape(A4, [osh(1) osh(2) osh(3) nSpec B]);
+    dinc = reshape(sum(A4u .* bc, [1 2 3]), [nSpec B]);
     d2 = d + dinc;
 end
 
@@ -317,16 +321,27 @@ function Y = i_pool_mean(X, op)
 end
 
 function [A2, d2] = i_avgpool_backward(A, d, op, precision)
+% Exact CROWN backward through non-overlapping avgpool (distribute A_out/(kh*kw) uniformly).
+% TRACEABLE: repelem + slice/cat (no indexed-assignment-into-zeros) so alpha's gradient flows.
     nSpec = size(A,1); B = size(A,3); osh = op.outShape; ish = op.inShape;
     kh = op.pool(1); kw = op.pool(2);
     Aperm = permute(A, [2 1 3]);
-    A4 = reshape(cast(Aperm,precision), [osh(1) osh(2) osh(3) nSpec*B]);
+    A4 = reshape(Aperm, [osh(1) osh(2) osh(3) nSpec*B]);
     Aup = repelem(A4, kh, kw, 1, 1) / (kh*kw);
-    Ain = zeros([ish(1) ish(2) ish(3) nSpec*B], precision);
     hi = min(ish(1), size(Aup,1)); wi = min(ish(2), size(Aup,2));
-    Ain(1:hi,1:wi,:,:) = Aup(1:hi,1:wi,:,:);
+    Ain = Aup(1:hi, 1:wi, :, :);                                   % traceable slice
+    if hi < ish(1) || wi < ish(2), Ain = i_zeropad_hw(Ain, ish(1), ish(2)); end
     A2 = permute(reshape(Ain, [prod(ish) nSpec B]), [2 1 3]);
     d2 = d;
+end
+
+function Y = i_zeropad_hw(X, H, W)
+% Traceable zero-pad of an [h w c n] array up to [H W c n] (cat with 'like' zeros keeps the tape).
+    h = size(X,1); w = size(X,2);
+    if h < H, X = cat(1, X, zeros([H-h, size(X,2), size(X,3), size(X,4)], 'like', X)); end
+    w = size(X,2);
+    if w < W, X = cat(2, X, zeros([size(X,1), W-w, size(X,3), size(X,4)], 'like', X)); end
+    Y = X;
 end
 
 function v = i_bcast_flat(x, sh, precision)

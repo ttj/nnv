@@ -44,10 +44,16 @@ function gpu_bab_alpha_dag_parity_test()
         mOpt = gpu_bab_crown_alpha_dag(ops, lb, ub, C, {}, reluIdx, prec, 15, 0.2, []);
         worst0  = min(mA0, [], 1);                    % the certified (worst-spec) margin per node
         worstOpt = min(mOpt, [], 1);
+        gain = min(worstOpt - worst0);
+        % SOUNDNESS: keep-best guarantees alpha-opt is never worse than min-area.
         assert(all(worstOpt >= worst0 - 1e-7), ...
-            '[%s] alpha-opt REGRESSED below min-area (unsound keep-best?): %.3e', ...
-            names{ni}, min(worstOpt - worst0));
-        fprintf('[%s] nIter>0 sound-and-no-worse OK (worst-margin gain %.3e)\n', names{ni}, min(worstOpt - worst0));
+            '[%s] alpha-opt REGRESSED below min-area (unsound keep-best?): %.3e', names{ni}, gain);
+        % ROUTE-B REGRESSION GUARD: with the traceable conv/pool backward, dlgradient must reach
+        % alpha and IMPROVE the bound on these nets (gain>0). gain==0 => the autodiff tape broke
+        % again (extractdata / indexed-assign crept back in) -> optimizer is a silent no-op.
+        assert(gain > 1e-4, ...
+            '[%s] alpha-opt did NOT improve (gain %.3e) -- autodiff tape likely severed (Route B).', names{ni}, gain);
+        fprintf('[%s] nIter>0 sound + OPTIMIZING OK (worst-margin gain %.3e)\n', names{ni}, gain);
     end
     fprintf('\nALL PARITY TESTS PASSED\n');
 end
