@@ -55,7 +55,30 @@ function gpu_bab_alpha_dag_parity_test()
             '[%s] alpha-opt did NOT improve (gain %.3e) -- autodiff tape likely severed (Route B).', names{ni}, gain);
         fprintf('[%s] nIter>0 sound + OPTIMIZING OK (worst-margin gain %.3e)\n', names{ni}, gain);
     end
-    fprintf('\nALL PARITY TESTS PASSED\n');
+
+    % ============ BETA soundness (Monte Carlo) — the -150 gate for the BaB path ============
+    % With BaB split fixings, alpha_dag optimizes [alpha;beta]. The returned bound MUST be a valid
+    % lower bound on min C*f(x) over inputs x in the box that SATISFY the split constraints. Sample
+    % such inputs, eval the true margin C*f, and assert bound <= the MC true-min (mB <= true_min <=
+    % MC_min). A violation means the beta dual is mis-implemented (wrong sign/neuron) -> false robust.
+    for ni = 1:numel(nets)
+        net = nets{ni}; ops = net.ops; reluIdx = net.reluIdx; n = net.nIn; nOut = net.nOut;
+        c = randn(n,1); rad = 0.4*(0.5+rand(n,1)); lb = c-rad; ub = c+rad; C = randn(3, nOut);
+        [fixings, x0] = i_make_fixings(ops, lb, ub, reluIdx, prec);
+        mB = gpu_bab_crown_alpha_dag(ops, lb, ub, C, fixings, reluIdx, prec, 20, 0.1, []); % alpha+beta
+        mB = min(mB, [], 2);                                  % per-spec bound (B=1)
+        nMC = 40000; X = [x0, lb + (ub - lb) .* rand(n, nMC-1)];   % witness x0 -> >=1 feasible sample
+        [Y, Z] = i_forward(ops, X, reluIdx);
+        ok = i_satisfies(Z, fixings, reluIdx, 0);
+        assert(any(ok), '[beta %d] no MC sample satisfied the split fixings (bad test setup)', ni);
+        minTrue = min(C * Y(:, ok), [], 2);                  % per-spec true min over feasible samples
+        viol = max(mB - minTrue);                            % must be <= 0 (sound)
+        assert(viol <= 1e-6, '[beta %d] BETA UNSOUND: bound exceeds MC true-min by %.3e', ni, viol);
+        fprintf('[beta soundness %d] OK (bound <= MC true-min; slack %.3e; %d/%d feasible)\n', ...
+            ni, min(minTrue - mB), sum(ok), nMC);
+    end
+
+    fprintf('\nALL PARITY + BETA-SOUNDNESS TESTS PASSED\n');
 end
 
 % =====================================================================================
@@ -164,4 +187,78 @@ function Y = i_pm(X, osh, kh, kw, stride)
 end
 function v = i_bcast(x, sh)
     v = reshape(zeros([sh(1) sh(2) sh(3)]) + x, [], 1);
+end
+
+% ---- beta-soundness helpers: split fixings + exact forward eval + constraint satisfaction -----
+function [fixings, x0] = i_make_fixings(ops, lb, ub, reluIdx, prec)
+% Fix up to 4 unstable neurons of the FIRST relu layer to a WITNESS point x0's actual signs, so the
+% split region is guaranteed non-empty (x0 satisfies it). IBP-unstable != forward-straddling, so
+% fixing by a real eval (not by sign alternation) is what keeps the constraints feasible.
+    rb = i_root_bounds(ops, lb, ub, reluIdx, prec);
+    nOps = numel(ops); fixings = cell(nOps,1);
+    k = reluIdx(1); l = rb.preL{k};
+    u = rb.preU{k};
+    uns = find(l < 0 & u > 0);
+    x0 = (lb + ub) / 2;
+    [~, Z0] = i_forward(ops, x0, reluIdx);
+    z0 = Z0{k};
+    fx = zeros(numel(l), 1, prec);
+    for i = 1:min(4, numel(uns))
+        j = uns(i); s = sign(z0(j)); if s == 0, s = 1; end
+        fx(j) = s;                              % fix to x0's actual sign -> x0 satisfies it
+    end
+    fixings{k} = fx;
+end
+
+function [Y, Z] = i_forward(ops, X, reluIdx) %#ok<INUSD>
+% Exact forward eval of the op list on columns of X (n x m). Y = output (nOut x m); Z{k} = the
+% pre-activation at each relu op (for the split-constraint check).
+    nOps = numel(ops); co = cell(nOps+1,1); co{1} = X; Z = cell(nOps,1);
+    for k = 1:nOps
+        op = ops{k};
+        if strcmp(op.type,'add')
+            a = op.inputs(1)+1; b = op.inputs(2)+1; co{k+1} = co{a} + co{b}; continue;
+        end
+        x = co{op.src+1};
+        switch op.type
+            case 'affine',     co{k+1} = op.W*x + op.b(:);
+            case 'conv',       co{k+1} = i_conv_fwd(op, x);
+            case 'normaffine', co{k+1} = i_bcast(op.scale,op.shape).*x + i_bcast(op.shift,op.shape);
+            case 'avgpool',    co{k+1} = i_avgpool_fwd(op, x);
+            case 'relu',       Z{k} = x; co{k+1} = max(x,0);
+        end
+    end
+    Y = co{nOps+1};
+end
+
+function y = i_conv_fwd(op, x)
+    ish=op.inShape; osh=op.outShape; m=size(x,2); bb=reshape(op.b(:),[1 1 osh(3)]);
+    X4=dlarray(reshape(x,[ish(1) ish(2) ish(3) m]),'SSCB');
+    pad2=[op.pad(1) op.pad(3); op.pad(2) op.pad(4)];
+    Y4=dlconv(X4,op.W,bb,'Stride',op.stride,'Padding',pad2,'DilationFactor',op.dil);
+    y=reshape(extractdata(Y4),[prod(osh) m]);
+end
+
+function y = i_avgpool_fwd(op, x)
+    ish=op.inShape; osh=op.outShape; m=size(x,2); kh=op.pool(1); kw=op.pool(2);
+    X4=reshape(x,[ish(1) ish(2) ish(3) m]); Y=zeros([osh(1) osh(2) osh(3) m]);
+    for oh=1:osh(1)
+        for ow=1:osh(2)
+            rh=(oh-1)*op.stride(1)+(1:kh); rw=(ow-1)*op.stride(2)+(1:kw);
+            Y(oh,ow,:,:)=mean(mean(X4(rh,rw,:,:),1),2);
+        end
+    end
+    y=reshape(Y,[prod(osh) m]);
+end
+
+function ok = i_satisfies(Z, fixings, reluIdx, tol)
+% Logical (1 x m): each sample satisfies every split constraint (active fix z>=0, inactive z<=0).
+    m = size(Z{reluIdx(1)}, 2); ok = true(1,m);
+    for r = 1:numel(reluIdx)
+        k = reluIdx(r);
+        if isempty(fixings) || numel(fixings)<k || isempty(fixings{k}), continue; end
+        fx = fixings{k}(:,1); z = Z{k};
+        if any(fx==1),  ok = ok & all(z(fx==1,:)  >= -tol, 1); end
+        if any(fx==-1), ok = ok & all(z(fx==-1,:) <=  tol, 1); end
+    end
 end
